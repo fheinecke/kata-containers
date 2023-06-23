@@ -76,8 +76,6 @@ function wait_till_node_is_ready() {
 }
 
 function configure_cri_runtime() {
-	configure_different_shims_base
-
 	case $1 in
 	crio)
 		configure_crio
@@ -92,79 +90,6 @@ function configure_cri_runtime() {
 	wait_till_node_is_ready
 }
 
-function backup_shim() {
-	local shim_file="$1"
-	local shim_backup="${shim_file}.bak"
-
-	if [ -f "${shim_file}" ]; then
-		echo "warning: ${shim_file} already exists" >&2
-		if [ ! -f "${shim_backup}" ]; then
-			mv "${shim_file}" "${shim_backup}"
-		else
-			rm "${shim_file}"
-		fi
-	fi
-}
-
-function configure_different_shims_base() {
-	# Currently containerd has an assumption on the location of the shimv2 implementation
-	# This forces kata-deploy to create files in a well-defined location that's part of
-	# the PATH, pointing to the containerd-shim-kata-v2 binary in /opt/kata/bin
-	# Issues:
-	#   https://github.com/containerd/containerd/issues/3073
-	#   https://github.com/containerd/containerd/issues/5006
-
-	local default_shim_file="/usr/local/bin/containerd-shim-kata-v2"
-
-	mkdir -p /usr/local/bin
-
-	for shim in "${shims[@]}"; do
-		local shim_binary="containerd-shim-kata-${shim}-v2"
-		local shim_file="/usr/local/bin/${shim_binary}"
-
-		backup_shim "${shim_file}"
-
-		if [[ "${shim}" == "dragonball" ]]; then
-			ln -sf /opt/kata/runtime-rs/bin/containerd-shim-kata-v2 "${shim_file}"
-		else
-			ln -sf /opt/kata/bin/containerd-shim-kata-v2 "${shim_file}"
-		fi
-		chmod +x "$shim_file"
-
-		if [ "${shim}" == "${default_shim}" ]; then
-			backup_shim "${default_shim_file}"
-
-			echo "Creating the default shim-v2 binary"
-			ln -sf "${shim_file}" "${default_shim_file}"
-		fi
-	done
-}
-
-function restore_shim() {
-	local shim_file="$1"
-	local shim_backup="${shim_file}.bak"
-
-	if [ -f "${shim_backup}" ]; then
-		mv "$shim_backup" "$shim_file"
-	fi
-}
-
-function cleanup_different_shims_base() {
-	local default_shim_file="/usr/local/bin/containerd-shim-kata-v2"
-
-	for shim in "${shims[@]}"; do
-		local shim_binary="containerd-shim-kata-${shim}-v2"
-		local shim_file="/usr/local/bin/${shim_binary}"
-
-		rm "${shim_file}" || true
-
-		restore_shim "${shim_file}"
-	done
-
-	rm "${default_shim_file}" || true
-	restore_shim "${default_shim_file}"
-}
-
 function configure_crio_runtime() {
 	local runtime="kata"
 	local configuration="configuration"
@@ -173,7 +98,7 @@ function configure_crio_runtime() {
 		configuration+="-$1"
 	fi
 
-	local kata_path="/usr/local/bin/containerd-shim-${runtime}-v2"
+	local kata_path="/opt/kata/bin/containerd-shim-${runtime}-v2"
 	local kata_conf="crio.runtime.runtimes.${runtime}"
 	local kata_config_path="/opt/kata/share/defaults/kata-containers/$configuration.toml"
 
@@ -216,6 +141,10 @@ function configure_containerd_runtime() {
 	if grep -q "version = 2\>" $containerd_conf_file; then
 		pluginid=\"io.containerd.grpc.v1.cri\"
 	fi
+	local runtime_path="/opt/kata/bin/containerd-shim-kata-v2"
+	if [ "$1" = "dragonball" ]; then
+		runtime_path="/opt/kata/runtime-rs/bin/containerd-shim-kata-v2"
+	fi
 	local runtime_table="plugins.${pluginid}.containerd.runtimes.$runtime"
 	local runtime_type="io.containerd.$runtime.v2"
 	local options_table="$runtime_table.options"
@@ -227,6 +156,7 @@ function configure_containerd_runtime() {
 		cat <<EOF | tee -a "$containerd_conf_file"
 [$runtime_table]
   runtime_type = "${runtime_type}"
+  runtime_path = "${runtime_path}"
   privileged_without_host_devices = true
   pod_annotations = ["io.katacontainers.*"]
 EOF
@@ -268,8 +198,6 @@ function remove_artifacts() {
 }
 
 function cleanup_cri_runtime() {
-	cleanup_different_shims_base
-
 	case $1 in
 	crio)
 		cleanup_crio
